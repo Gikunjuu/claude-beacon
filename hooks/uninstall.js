@@ -7,9 +7,7 @@ const path = require("path");
 const cp = require("child_process");
 
 const home = os.homedir();
-// Match every hook command we added: they all point inside ~/.claude/statusbar/
-// (update.js AND lifecycle.js). The narrower "update.js" marker used to leave the
-// SessionStart/SessionEnd lifecycle hooks behind. Never matches unrelated hooks.
+// Match the dir, not "update.js": the narrower marker used to orphan the lifecycle hooks.
 const MARKER = path.join(home, ".claude", "statusbar");
 const settingsPath = path.join(home, ".claude", "settings.json");
 

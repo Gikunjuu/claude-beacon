@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Invoked by Claude Code hooks. Reads the hook JSON payload on stdin, maps the
 // event to a status, and atomically writes ~/.claude/statusbar/state.json.
-// Usage: node update.js <prompt|pre|post|notify|stop>
+// Usage: node update.js <prompt|pre|post|notify|permreq|stop>
 
 const fs = require("fs");
 const os = require("os");
@@ -24,13 +24,23 @@ process.stdin.on("end", () => {
   let p = {};
   try { p = JSON.parse(raw || "{}"); } catch {}
 
-  // Optional debug log of every hook invocation (event, tool, message, payload keys).
-  // Off by default; enable with CLAUDE_STATUSBAR_DEBUG=1 to inspect what fires.
+  // Off by default; CLAUDE_STATUSBAR_DEBUG=1 logs every hook invocation to hooks.log.
   if (process.env.CLAUDE_STATUSBAR_DEBUG === "1") {
     try {
       fs.mkdirSync(dir, { recursive: true });
       fs.appendFileSync(path.join(dir, "hooks.log"),
         `${new Date().toISOString()} [${event}] tool=${p.tool_name || "-"} mode=${p.permission_mode || "-"} msg=${JSON.stringify(p.message || "").slice(0, 160)} keys=${Object.keys(p).join(",")}\n`);
+    } catch {}
+  }
+
+  // Register the session here too, so a session that predates the hook install (never
+  // fired SessionStart) still gets tracked once it does anything. See CLAUDE.md gotcha.
+  const sid = String(p.session_id || "").replace(/[^A-Za-z0-9_.-]/g, "").slice(0, 64);
+  if (sid) {
+    try {
+      const sessDir = path.join(dir, "sessions.d");
+      fs.mkdirSync(sessDir, { recursive: true });
+      fs.writeFileSync(path.join(sessDir, sid), "");
     } catch {}
   }
 
@@ -57,17 +67,19 @@ process.stdin.on("end", () => {
       if (!startedAt) startedAt = ts;
       break;
     case "notify": {
+      // Only a permission prompt drives the icon here (CLI path; desktop uses permreq). Ignore
+      // every other Notification (esp. the idle_prompt "Claude is waiting for your input") so the
+      // icon rests instead of parking on a confusing "Waiting for you". See CLAUDE.md.
       const m = (p.message || "").toLowerCase();
-      if (m.includes("permission") || m.includes("approve") || m.includes("allow")) {
-        state = "permission"; label = "Awaiting permission";
-      } else if (m.includes("waiting")) {
-        state = "waiting"; label = "Waiting for you";
-      } else {
-        state = "waiting"; label = p.message || "Waiting";
-      }
-      startedAt = 0;
+      const isPerm = p.notification_type === "permission_prompt" ||
+        m.includes("permission") || m.includes("approve") || m.includes("allow");
+      if (!isPerm) return;
+      state = "permission"; label = "Awaiting permission"; startedAt = 0;
       break;
     }
+    case "permreq":
+      // Desktop-app permission signal; not redundant with notify (that's CLI-only). See CLAUDE.md.
+      state = "permission"; label = "Awaiting permission"; startedAt = 0; break;
     case "stop":
       state = "done"; label = "Done"; startedAt = 0; break;
     default:

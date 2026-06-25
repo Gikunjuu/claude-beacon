@@ -16,9 +16,7 @@ const lifecycleDest = path.join(sbDir, "lifecycle.js");
 const settingsPath = path.join(home, ".claude", "settings.json");
 const node = process.execPath;
 
-// Clean up the old 0.0.2 background watcher on upgrade: 0.0.3+ has the app quit itself
-// (no LaunchAgent), so remove any leftover agent/script that would otherwise linger as a
-// "bash" background item.
+// Retire the old 0.0.2 background watcher LaunchAgent on upgrade (0.0.3+ self-quits).
 const OLD_AGENT_LABEL = "com.local.claudebeacon.watcher";
 const oldAgentPlist = path.join(home, "Library", "LaunchAgents", OLD_AGENT_LABEL + ".plist");
 try { cp.execSync(`launchctl bootout gui/${process.getuid()}/${OLD_AGENT_LABEL}`, { stdio: "ignore" }); } catch {}
@@ -62,6 +60,7 @@ addUnmatched("UserPromptSubmit", cmd("prompt"));
 addMatched("PreToolUse", cmd("pre"));
 addMatched("PostToolUse", cmd("post"));
 addUnmatched("Notification", cmd("notify"));
+addMatched("PermissionRequest", cmd("permreq"));
 addUnmatched("Stop", cmd("stop"));
 // Lifecycle hooks (launch the app on open; the app quits itself when no longer needed)
 addUnmatched("SessionStart", life("start"));

@@ -10,7 +10,9 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
 
 echo "Compiling…"
-swiftc -O Sources/*.swift -o "$BIN" -framework Cocoa
+# Pin the deployment target, else swiftc stamps the binary with the build machine's OS
+# (e.g. macOS 26), making it refuse to launch on older systems despite LSMinimumSystemVersion.
+swiftc -O -target arm64-apple-macos12.0 Sources/*.swift -o "$BIN" -framework Cocoa
 
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -21,8 +23,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleDisplayName</key><string>Claude Beacon</string>
   <key>CFBundleIdentifier</key><string>com.local.claudebeacon</string>
   <key>CFBundleExecutable</key><string>ClaudeBeacon</string>
-  <key>CFBundleVersion</key><string>0.0.3</string>
-  <key>CFBundleShortVersionString</key><string>0.0.3</string>
+  <key>CFBundleVersion</key><string>0.2.2</string>
+  <key>CFBundleShortVersionString</key><string>0.2.2</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>LSMinimumSystemVersion</key><string>12.0</string>
   <key>LSUIElement</key><true/>
@@ -35,6 +37,7 @@ PLIST
 mkdir -p "$APP/Contents/Resources"
 cp hooks/update.js hooks/lifecycle.js hooks/install.js hooks/uninstall.js "$APP/Contents/Resources/"
 cp assets/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
+cp assets/completion.mp3 "$APP/Contents/Resources/completion.mp3"
 
 # --- Signing / notarization ---
 # For a clean (no Gatekeeper warning) release you need, set up once on this Mac:
@@ -49,6 +52,10 @@ NOTARY_PROFILE="${NOTARY_PROFILE:-claude-statusbar}"
 
 SIGN_ID="$(security find-identity -v -p codesigning 2>/dev/null \
   | grep "Developer ID Application" | grep "$TEAM_ID" | head -1 | sed -E 's/.*"(.*)"/\1/')"
+
+# Strip extended attributes (Finder info, quarantine, etc.) that bundled resources can
+# carry — codesign rejects them ("resource fork, Finder information, ... not allowed").
+xattr -cr "$APP"
 
 if [[ -n "$SIGN_ID" ]]; then
   echo "Signing with Developer ID: $SIGN_ID"
@@ -81,7 +88,8 @@ if [[ "${1:-}" == "--dmg" ]]; then
   cp -R "$APP" "$STAGE/"
   ln -s /Applications "$STAGE/Applications"
 
-  # Lay out the window on a read-write image, then compress it.
+  # Lay out the window on a read-write image to capture its .DS_Store, then build the final
+  # image from the folder (see below).
   hdiutil create -volname "Claude Beacon" -srcfolder "$STAGE" -ov -format UDRW build/rw.dmg >/dev/null
   device="$(hdiutil attach -readwrite -noverify -noautoopen build/rw.dmg | grep -E '^/dev/' | head -1 | awk '{print $1}')"
   sleep 1
@@ -105,12 +113,16 @@ tell application "Finder"
   end tell
 end tell
 OSA
-  # Strip macOS junk right before detach. No DMG stapling happens after this, so it stays gone.
-  rm -rf "/Volumes/Claude Beacon/.fseventsd" "/Volumes/Claude Beacon/.Trashes" 2>/dev/null || true
-  sync; sleep 1
+  # Capture the layout Finder just wrote (.DS_Store), then discard the writable image and build
+  # the final compressed image straight from the folder. Building from a folder never mounts a
+  # writable volume, so macOS's fseventsd never creates a hidden .fseventsd in the shipped DMG.
+  # (Removing .fseventsd from a mounted volume does not stick: the removal is itself an event
+  # fseventsd logs, which recreates the folder.)
+  cp "/Volumes/Claude Beacon/.DS_Store" "$STAGE/.DS_Store" 2>/dev/null || true
   hdiutil detach "$device" >/dev/null || true
-  hdiutil convert build/rw.dmg -format UDZO -o "$DMG" >/dev/null
-  rm -rf build/rw.dmg "$STAGE"
+  rm -f build/rw.dmg
+  hdiutil create -volname "Claude Beacon" -srcfolder "$STAGE" -ov -format UDZO "$DMG" >/dev/null
+  rm -rf "$STAGE"
 
   # Sign, then notarize + staple the DMG so the downloaded image opens with no Gatekeeper
   # warning. Stapling writes the ticket into the read-only image's metadata; it does not
