@@ -290,11 +290,12 @@ final class StatusController: NSObject, NSMenuDelegate {
         menu.addItem(ctxIt)
 
         // Approx cost
-        let pricing = StatusController.modelPricing.first(where: { model.hasPrefix($0.key) })?.value
-            ?? StatusController.modelPricing.first(where: { model.contains("opus") })?.value
-            ?? (3.00, 15.00) // default to Sonnet pricing if model unknown
-        let cost = (Double(sessIn) / 1_000_000 * pricing.input)
-                 + (Double(sessOut) / 1_000_000 * pricing.output)
+        let rawPricing = StatusController.modelPricing.first(where: { model.hasPrefix($0.key) })?.value
+            ?? StatusController.modelPricing.first(where: { _ in model.contains("opus") })?.value
+        let pIn  = rawPricing?.input  ?? 3.00
+        let pOut = rawPricing?.output ?? 15.00
+        let cost = (Double(sessIn) / 1_000_000 * pIn)
+                 + (Double(sessOut) / 1_000_000 * pOut)
         let costStr = cost < 0.01 ? "<$0.01" : String(format: "$%.2f", cost)
         let costIt = NSMenuItem(title: "Cost:         ~\(costStr)\(model.isEmpty ? "" : "  (\(shortModel(model)))")", action: nil, keyEquivalent: "")
         costIt.isEnabled = false
