@@ -80,13 +80,40 @@ process.stdin.on("end", () => {
     case "permreq":
       // Desktop-app permission signal; not redundant with notify (that's CLI-only). See CLAUDE.md.
       state = "permission"; label = "Awaiting permission"; startedAt = 0; break;
-    case "stop":
-      state = "done"; label = "Done"; startedAt = 0; break;
+    case "stop": {
+      state = "done"; label = "Done"; startedAt = 0;
+
+      // Capture per-turn token usage and accumulate session totals.
+      const u = p.usage || {};
+      const turnIn  = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
+      const turnOut = u.output_tokens || 0;
+      const model   = p.model || prev.model || "";
+
+      // Running session totals (reset when a new prompt arrives, handled on "prompt").
+      const sessIn  = (prev.sessIn  || 0) + turnIn;
+      const sessOut = (prev.sessOut || 0) + turnOut;
+
+      Object.assign(prev, { turnIn, turnOut, sessIn, sessOut, model });
+      break;
+    }
     default:
       return;
   }
 
-  const out = { state, label, tool: p.tool_name || "", project, sessionId: p.session_id || "", transcript: p.transcript_path || prev.transcript || "", startedAt, ts };
+  // Reset session totals on a fresh prompt.
+  if (event === "prompt") { prev.sessIn = 0; prev.sessOut = 0; }
+
+  const out = {
+    state, label, tool: p.tool_name || "", project,
+    sessionId: p.session_id || "",
+    transcript: p.transcript_path || prev.transcript || "",
+    startedAt, ts,
+    turnIn:  prev.turnIn  || 0,
+    turnOut: prev.turnOut || 0,
+    sessIn:  prev.sessIn  || 0,
+    sessOut: prev.sessOut || 0,
+    model:   prev.model   || "",
+  };
   try {
     fs.mkdirSync(dir, { recursive: true });
     const tmp = statePath + "." + process.pid + ".tmp";

@@ -39,6 +39,21 @@ final class StatusController: NSObject, NSMenuDelegate {
     }()
     var prevEff = ""               // last effective state, for detecting turn completion
     var lastTurnStart: Double = 0  // active turn's start time, for the 1-minute gate
+
+    // Token pricing per million tokens (input / output). Covers current Claude models.
+    // Cache read/creation tokens are bundled into input for simplicity.
+    static let modelPricing: [String: (input: Double, output: Double)] = [
+        "claude-opus-4-5":          (15.00, 75.00),
+        "claude-opus-4":            (15.00, 75.00),
+        "claude-sonnet-4-5":        ( 3.00, 15.00),
+        "claude-sonnet-4":          ( 3.00, 15.00),
+        "claude-haiku-4-5":         ( 0.80,  4.00),
+        "claude-haiku-3-5":         ( 0.80,  4.00),
+        "claude-3-5-sonnet-20241022":( 3.00, 15.00),
+        "claude-3-5-haiku-20241022": ( 0.80,  4.00),
+        "claude-3-opus-20240229":   (15.00, 75.00),
+    ]
+    static let contextWindow = 200_000  // tokens, same across all current Claude models
     var iconColor: NSColor? { iconSystem ? nil : brand } // nil => render as an adaptive template
     let codeGlyphs = ["✻", "✽", "✶", "✳", "✢"]
     let codePeaks: [CGFloat] = [1.0, 1.0, 1.0, 1.0, 1.0]
@@ -222,6 +237,10 @@ final class StatusController: NSObject, NSMenuDelegate {
         }
 
         menu.addItem(.separator())
+        menu.addItem(header("Usage"))
+        buildUsageItems(into: menu)
+
+        menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Version \(currentVersion)", action: nil, keyEquivalent: ""))
         if let latest = UserDefaults.standard.string(forKey: "latestVersion"), versionIsNewer(latest, than: currentVersion) {
             let up = NSMenuItem(title: "Update available", action: #selector(openLatestRelease), keyEquivalent: "")
@@ -231,6 +250,62 @@ final class StatusController: NSObject, NSMenuDelegate {
         let q = NSMenuItem(title: "Quit Claude Beacon", action: #selector(quit), keyEquivalent: "q")
         q.target = self
         menu.addItem(q)
+    }
+
+    func buildUsageItems(into menu: NSMenu) {
+        let turnIn  = (current["turnIn"]  as? Int) ?? 0
+        let turnOut = (current["turnOut"] as? Int) ?? 0
+        let sessIn  = (current["sessIn"]  as? Int) ?? 0
+        let sessOut = (current["sessOut"] as? Int) ?? 0
+        let model   = (current["model"]   as? String) ?? ""
+
+        guard sessIn > 0 || sessOut > 0 else {
+            let none = NSMenuItem(title: "No data yet", action: nil, keyEquivalent: "")
+            none.isEnabled = false
+            menu.addItem(none)
+            return
+        }
+
+        let fmt = { (n: Int) -> String in
+            n >= 1000 ? "\(n / 1000)k" : "\(n)"
+        }
+
+        // Last turn row
+        if turnIn > 0 || turnOut > 0 {
+            let it = NSMenuItem(title: "Last turn:  \(fmt(turnIn)) in / \(fmt(turnOut)) out", action: nil, keyEquivalent: "")
+            it.isEnabled = false
+            menu.addItem(it)
+        }
+
+        // Session total row
+        let sessIt = NSMenuItem(title: "Session:     \(fmt(sessIn)) in / \(fmt(sessOut)) out", action: nil, keyEquivalent: "")
+        sessIt.isEnabled = false
+        menu.addItem(sessIt)
+
+        // Context used % (200k window)
+        let pct = min(100, Int(Double(sessIn) / Double(StatusController.contextWindow) * 100))
+        let bar = String(repeating: "█", count: pct / 10) + String(repeating: "░", count: 10 - pct / 10)
+        let ctxIt = NSMenuItem(title: "Context:    \(bar)  \(pct)%", action: nil, keyEquivalent: "")
+        ctxIt.isEnabled = false
+        menu.addItem(ctxIt)
+
+        // Approx cost
+        let pricing = StatusController.modelPricing.first(where: { model.hasPrefix($0.key) })?.value
+            ?? StatusController.modelPricing.first(where: { model.contains("opus") })?.value
+            ?? (3.00, 15.00) // default to Sonnet pricing if model unknown
+        let cost = (Double(sessIn) / 1_000_000 * pricing.input)
+                 + (Double(sessOut) / 1_000_000 * pricing.output)
+        let costStr = cost < 0.01 ? "<$0.01" : String(format: "$%.2f", cost)
+        let costIt = NSMenuItem(title: "Cost:         ~\(costStr)\(model.isEmpty ? "" : "  (\(shortModel(model)))")", action: nil, keyEquivalent: "")
+        costIt.isEnabled = false
+        menu.addItem(costIt)
+    }
+
+    func shortModel(_ m: String) -> String {
+        if m.contains("opus")   { return "Opus" }
+        if m.contains("sonnet") { return "Sonnet" }
+        if m.contains("haiku")  { return "Haiku" }
+        return m
     }
 
     func header(_ title: String) -> NSMenuItem {
