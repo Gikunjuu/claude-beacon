@@ -24,6 +24,9 @@ if (fs.existsSync(oldAgentPlist)) { fs.rmSync(oldAgentPlist); console.log("Remov
 
 fs.mkdirSync(sbDir, { recursive: true });
 fs.rmSync(path.join(sbDir, "watcher.sh"), { force: true });
+// Retire pre-multi-session artifacts (single global state + empty liveness markers).
+fs.rmSync(path.join(sbDir, "state.json"), { force: true });
+fs.rmSync(path.join(sbDir, "sessions.d"), { recursive: true, force: true });
 fs.copyFileSync(path.join(__dirname, "update.js"), updateDest);
 fs.copyFileSync(path.join(__dirname, "lifecycle.js"), lifecycleDest);
 

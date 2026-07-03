@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-// Removes the status-bar hooks from ~/.claude/settings.json. Leaves all other hooks intact.
 
 const fs = require("fs");
 const os = require("os");

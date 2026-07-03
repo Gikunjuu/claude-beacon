@@ -1,7 +1,5 @@
 #!/usr/bin/env node
-// SessionStart/SessionEnd: launch the app, and track sessions as one file per session id
-// in sessions.d/ (race-free; the app quits itself). Rationale + history in CLAUDE.md.
-// Usage: node lifecycle.js <start|end>   (hook JSON, incl. session_id, arrives on stdin)
+// SessionStart/SessionEnd hooks. Usage: node lifecycle.js <start|end>  (hook JSON, incl. session_id, on stdin)
 
 const fs = require("fs");
 const os = require("os");
@@ -11,29 +9,19 @@ const cp = require("child_process");
 const BUNDLE_ID = "com.local.claudebeacon";
 const EXEC = "ClaudeBeacon";
 const dir = path.join(os.homedir(), ".claude", "statusbar");
-const sessDir = path.join(dir, "sessions.d");
-const statePath = path.join(dir, "state.json");
+const stateDir = path.join(dir, "state.d");
 const event = process.argv[2];
 
-fs.mkdirSync(sessDir, { recursive: true });
+fs.mkdirSync(stateDir, { recursive: true });
 
 const running = () => { try { cp.execSync(`pgrep -x ${EXEC}`, { stdio: "ignore" }); return true; } catch { return false; } };
 const safeId = (s) => String(s || "").replace(/[^A-Za-z0-9_.-]/g, "").slice(0, 64) || "unknown";
 
-// Reset a frozen animation when its OWNING session ends/resumes (force-quit fires SessionEnd
-// but no Stop). The session-id gate is load-bearing: warmup-churn bursts must not clear a live
-// turn. Full rationale in CLAUDE.md.
-function clearStaleState(id) {
-  try {
-    const prev = JSON.parse(fs.readFileSync(statePath, "utf8"));
-    if (safeId(prev.sessionId) !== id) return;
-    if (!["thinking", "tool", "permission"].includes(prev.state)) return;
-    const out = { ...prev, state: "idle", label: "", startedAt: 0, ts: Math.floor(Date.now() / 1000) };
-    const tmp = statePath + "." + process.pid + ".tmp";
-    fs.writeFileSync(tmp, JSON.stringify(out));
-    fs.renameSync(tmp, statePath);
-  } catch {}
-}
+const writeAtomic = (file, obj) => {
+  const tmp = file + "." + process.pid + ".tmp";
+  fs.writeFileSync(tmp, JSON.stringify(obj));
+  fs.renameSync(tmp, file);
+};
 
 let input = "", done = false;
 process.stdin.on("data", (d) => (input += d));
@@ -43,20 +31,27 @@ setTimeout(run, 1000); // hooks always pipe stdin, but never hang the session
 
 function run() {
   if (done) return; done = true;
-  let id = "";
-  try { id = JSON.parse(input).session_id; } catch {}
+  let id = "", cwd = "";
+  try { const j = JSON.parse(input); id = j.session_id; cwd = j.cwd || ""; } catch {}
   id = safeId(id);
+  const statePath = path.join(stateDir, id + ".json");
 
   if (event === "start") {
     // If the app isn't running, any leftover session files are stale (e.g. a prior
     // crash) — clear them so the count starts honest.
-    if (!running()) { try { for (const f of fs.readdirSync(sessDir)) fs.rmSync(path.join(sessDir, f), { force: true }); } catch {} }
-    try { fs.writeFileSync(path.join(sessDir, id), ""); } catch {}
-    clearStaleState(id);
+    if (!running()) { try { for (const f of fs.readdirSync(stateDir)) fs.rmSync(path.join(stateDir, f), { force: true }); } catch {} }
+    // Seed an idle file: counts the session immediately, and clears any frozen state from a
+    // resume (SessionStart fires on resume with no active turn).
+    try {
+      // started:false — a merely-opened conversation seeds this for launch + liveness but stays out of
+      // the dropdown until it has real activity (update.js flips started:true on a prompt/tool).
+      writeAtomic(statePath, { state: "idle", label: "", tool: "", project: cwd ? path.basename(cwd) : "", sessionId: id, transcript: "", entrypoint: process.env.CLAUDE_CODE_ENTRYPOINT || "", term_program: process.env.TERM_PROGRAM || "", pid: process.ppid, started: false, startedAt: 0, ts: Math.floor(Date.now() / 1000) });
+    } catch {}
     cp.spawn("open", ["-g", "-b", BUNDLE_ID], { stdio: "ignore", detached: true }).unref();
   } else if (event === "end") {
-    try { fs.rmSync(path.join(sessDir, id), { force: true }); } catch {}
-    clearStaleState(id);
+    // Removing the file drops this session from the aggregate — this is also what recovers a
+    // frozen animation on force-quit (SessionEnd fires, but no Stop). No state rewrite needed.
+    try { fs.rmSync(statePath, { force: true }); } catch {}
   }
   process.exit(0);
 }

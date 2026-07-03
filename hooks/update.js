@@ -1,6 +1,5 @@
 #!/usr/bin/env node
-// Invoked by Claude Code hooks. Reads the hook JSON payload on stdin, maps the
-// event to a status, and atomically writes ~/.claude/statusbar/state.json.
+// Maps a Claude Code hook event to this session's file: ~/.claude/statusbar/state.d/<session_id>.json
 // Usage: node update.js <prompt|pre|post|notify|permreq|stop>
 
 const fs = require("fs");
@@ -8,7 +7,7 @@ const os = require("os");
 const path = require("path");
 
 const dir = path.join(os.homedir(), ".claude", "statusbar");
-const statePath = path.join(dir, "state.json");
+const stateDir = path.join(dir, "state.d");
 const event = process.argv[2] || "";
 
 const TOOL_LABELS = {
@@ -17,6 +16,8 @@ const TOOL_LABELS = {
   WebFetch: "Browsing web", WebSearch: "Searching web", Task: "Delegating",
   TodoWrite: "Planning",
 };
+
+const safeId = (s) => String(s || "").replace(/[^A-Za-z0-9_.-]/g, "").slice(0, 64) || "unknown";
 
 let raw = "";
 process.stdin.on("data", (d) => (raw += d));
@@ -33,16 +34,10 @@ process.stdin.on("end", () => {
     } catch {}
   }
 
-  // Register the session here too, so a session that predates the hook install (never
-  // fired SessionStart) still gets tracked once it does anything. See CLAUDE.md gotcha.
-  const sid = String(p.session_id || "").replace(/[^A-Za-z0-9_.-]/g, "").slice(0, 64);
-  if (sid) {
-    try {
-      const sessDir = path.join(dir, "sessions.d");
-      fs.mkdirSync(sessDir, { recursive: true });
-      fs.writeFileSync(path.join(sessDir, sid), "");
-    } catch {}
-  }
+  // This session's own file is the unit of state AND the liveness marker. Writing it on any
+  // event also tracks sessions that predate the hook install (never fired SessionStart).
+  const sid = safeId(p.session_id);
+  const statePath = path.join(stateDir, sid + ".json");
 
   let prev = {};
   try { prev = JSON.parse(fs.readFileSync(statePath, "utf8")); } catch {}
@@ -56,8 +51,6 @@ process.stdin.on("end", () => {
       state = "thinking"; label = "Thinking…"; startedAt = ts; break;
     case "pre": {
       const t = p.tool_name || "";
-      // Known tools get a friendly verb; everything else (incl. long mcp__server__method
-      // names) collapses to a generic "Using tool".
       state = "tool"; label = TOOL_LABELS[t] || "Using tool";
       if (!startedAt) startedAt = ts;
       break;
@@ -69,7 +62,7 @@ process.stdin.on("end", () => {
     case "notify": {
       // Only a permission prompt drives the icon here (CLI path; desktop uses permreq). Ignore
       // every other Notification (esp. the idle_prompt "Claude is waiting for your input") so the
-      // icon rests instead of parking on a confusing "Waiting for you". See CLAUDE.md.
+      // icon rests instead of parking on a confusing "Waiting for you".
       const m = (p.message || "").toLowerCase();
       const isPerm = p.notification_type === "permission_prompt" ||
         m.includes("permission") || m.includes("approve") || m.includes("allow");
@@ -78,21 +71,16 @@ process.stdin.on("end", () => {
       break;
     }
     case "permreq":
-      // Desktop-app permission signal; not redundant with notify (that's CLI-only). See CLAUDE.md.
+      // Desktop-app permission signal; not redundant with notify (that's CLI-only).
       state = "permission"; label = "Awaiting permission"; startedAt = 0; break;
     case "stop": {
       state = "done"; label = "Done"; startedAt = 0;
-
-      // Capture per-turn token usage and accumulate session totals.
       const u = p.usage || {};
       const turnIn  = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
       const turnOut = u.output_tokens || 0;
       const model   = p.model || prev.model || "";
-
-      // Running session totals (reset when a new prompt arrives, handled on "prompt").
       const sessIn  = (prev.sessIn  || 0) + turnIn;
       const sessOut = (prev.sessOut || 0) + turnOut;
-
       Object.assign(prev, { turnIn, turnOut, sessIn, sessOut, model });
       break;
     }
@@ -100,22 +88,20 @@ process.stdin.on("end", () => {
       return;
   }
 
-  // Reset session totals on a fresh prompt.
+  // CLAUDE_CODE_ENTRYPOINT tags the surface running this session ("cli", "claude-desktop", …);
+  // carried over from prev for the odd event where the env var isn't set.
+  const entrypoint = process.env.CLAUDE_CODE_ENTRYPOINT || prev.entrypoint || "";
+  // TERM_PROGRAM identifies the terminal app for a CLI session (Apple_Terminal, iTerm.app,
+  // vscode, WezTerm, …); the app uses it to bring that terminal to the front on a row click.
+  const termProgram = process.env.TERM_PROGRAM || prev.term_program || "";
+  // process.ppid IS this session's `claude` process (verified: hooks are spawned directly by it,
+  // stable for the session's life, on both CLI and desktop). The app uses kill(pid,0) for liveness.
+  // started:true — any update.js event (prompt/tool/permission/stop) is real activity, so the session
+  // graduates from "merely opened" to visible in the dropdown. Clicking a conversation never fires here.
   if (event === "prompt") { prev.sessIn = 0; prev.sessOut = 0; }
-
-  const out = {
-    state, label, tool: p.tool_name || "", project,
-    sessionId: p.session_id || "",
-    transcript: p.transcript_path || prev.transcript || "",
-    startedAt, ts,
-    turnIn:  prev.turnIn  || 0,
-    turnOut: prev.turnOut || 0,
-    sessIn:  prev.sessIn  || 0,
-    sessOut: prev.sessOut || 0,
-    model:   prev.model   || "",
-  };
+  const out = { state, label, tool: p.tool_name || "", project, sessionId: p.session_id || "", transcript: p.transcript_path || prev.transcript || "", entrypoint, term_program: termProgram, pid: process.ppid, started: true, startedAt, ts, turnIn: prev.turnIn || 0, turnOut: prev.turnOut || 0, sessIn: prev.sessIn || 0, sessOut: prev.sessOut || 0, model: prev.model || "" };
   try {
-    fs.mkdirSync(dir, { recursive: true });
+    fs.mkdirSync(stateDir, { recursive: true });
     const tmp = statePath + "." + process.pid + ".tmp";
     fs.writeFileSync(tmp, JSON.stringify(out));
     fs.renameSync(tmp, statePath);
