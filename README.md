@@ -18,14 +18,27 @@ Signed and notarized — opens normally, no Gatekeeper warning. See [Install](#i
 |---|---|
 | **Thinking / working** | Animated Claude spark + live `1m 23s` timer |
 | **Running a tool** | Short label: `Editing`, `Reading`, `Running command`, `Using tool`, … |
-| **Awaiting permission** | Paused yellow dot (CLI only — see [note below](#permission-detection-is-cli-only)) |
-| **Idle / done** | Static Claude logo |
+| **Awaiting permission** | Paused yellow dot + macOS notification (CLI only — see [note below](#permission-detection-is-cli-only)) |
+| **Recently done** | Green checkmark for 10 minutes after a turn finishes |
+| **Idle** | Static Claude logo |
 
 Two animation styles (pick in the menu):
 - **Claude** — the web "morph" spark
 - **Claude Code** — the terminal glyph spinner
+- **Crab Walking** — because why not
 
 Two color modes: **Orange** (Anthropic's `#d97757`) or **System** (adaptive black/white, matches your other menu bar icons). The elapsed timer can be toggled off. All preferences are persisted.
+
+### Notifications
+
+Claude Beacon fires macOS notifications so you can step away during long runs and get pulled back when it matters:
+
+| Notification | When | Surface |
+|---|---|---|
+| **Claude finished** | Any CLI turn that runs 5+ minutes | CLI only |
+| **Approval needed** | The moment a permission prompt appears | CLI only |
+
+Both have an action button — "Open" or "Review" — that brings the terminal to front. Toggle either off under **Settings → Notifications** in the menu.
 
 ---
 
@@ -45,7 +58,7 @@ Chat and Cowork don't fire Claude Code's hook events, so the status bar stays id
 
 ### Permission detection is CLI-only
 
-The yellow "Awaiting permission" dot fires from Claude Code's permission *notification* hook, which only runs in the **CLI**. The Desktop app handles its permission prompts in-app and doesn't emit that hook — the icon stays on the current tool label while the prompt is open. Everything else (thinking, tools, lifecycle) works identically in both CLI and Desktop.
+The yellow dot and permission notification fire from Claude Code's permission hook, which only runs in the **CLI**. The Desktop app handles its permission prompts in-app and doesn't emit that hook — the icon stays on the current tool label while the prompt is open. Everything else (thinking, tools, lifecycle, completion sound) works identically in both CLI and Desktop.
 
 If you run in **auto / bypass mode**, permission prompts never fire anyway, so this distinction is moot.
 

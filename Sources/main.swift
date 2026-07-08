@@ -1,4 +1,5 @@
 import Cocoa
+import UserNotifications
 
 // Custom-drawn toggle. NSSwitch can't show its accent inside a menu (the menu's vibrant, non-key
 // window draws the implicit accent gray), so we render the track + knob as layers and fill the
@@ -192,7 +193,7 @@ final class SessionRowView: NSView {
     override func mouseDown(with event: NSEvent) { onClick?() }
 }
 
-final class StatusController: NSObject, NSMenuDelegate {
+final class StatusController: NSObject, NSMenuDelegate, UNUserNotificationCenterDelegate {
     let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     let stateDir = (NSHomeDirectory() as NSString).appendingPathComponent(".claude/statusbar/state.d")
     let claudeDesktopBundleID = "com.anthropic.claudefordesktop"
@@ -221,6 +222,7 @@ final class StatusController: NSObject, NSMenuDelegate {
                                 // conversation seeds started=false and stays out of the dropdown.
         var startedAt: Double, ts: Double
         var eff: String = ""   // effective state, recomputed once per tick in evaluate()
+        var sessStart: Double = 0, turnCount: Int = 0
         var turnIn: Int = 0, turnOut: Int = 0, sessIn: Int = 0, sessOut: Int = 0, model: String = ""
 
         init(json o: [String: Any], id: String) {
@@ -235,6 +237,8 @@ final class StatusController: NSObject, NSMenuDelegate {
             self.started = o["started"] as? Bool ?? false
             self.startedAt = (o["startedAt"] as? NSNumber)?.doubleValue ?? 0
             self.ts = (o["ts"] as? NSNumber)?.doubleValue ?? 0
+            self.sessStart = (o["sessStart"] as? NSNumber)?.doubleValue ?? 0
+            self.turnCount = (o["turnCount"] as? NSNumber)?.intValue ?? 0
             self.turnIn  = (o["turnIn"]  as? NSNumber)?.intValue ?? 0
             self.turnOut = (o["turnOut"] as? NSNumber)?.intValue ?? 0
             self.sessIn  = (o["sessIn"]  as? NSNumber)?.intValue ?? 0
@@ -246,6 +250,10 @@ final class StatusController: NSObject, NSMenuDelegate {
     var fileMTimes: [String: Date] = [:]   // "<id>.json" -> last-parsed mtime (re-parse only on change)
     var soundPrev: [String: String] = [:]  // id -> previous raw state (completion-sound edge)
     var turnStart: [String: Double] = [:]  // id -> active turn start (5-min sound gate)
+    var doneUntil: [String: Double] = [:]  // id -> unix ts; show green "Done" until this time
+    var permPrev: [String: String] = [:]   // id -> previous eff state for permission-edge detection
+    var notifyCompletion = true            // fire a notification when a long turn finishes
+    var notifyPermission = true            // fire a notification when Claude needs approval
     var menuIsOpen = false                  // refresh the dropdown's per-session timers only while open
     var sessionMenuItems: [(item: NSMenuItem, id: String)] = []
     var activeBase = ""        // label without the elapsed clock
@@ -332,6 +340,9 @@ final class StatusController: NSObject, NSMenuDelegate {
         if d.object(forKey: "completionSound") != nil { playCompletionSound = d.bool(forKey: "completionSound") }
         if d.object(forKey: "thinkingWords") != nil { useThinkingWords = d.bool(forKey: "thinkingWords") }
         if let s = d.string(forKey: "animStyle"), let st = AnimStyle(rawValue: s) { animStyle = st }
+        if d.object(forKey: "notifyCompletion") != nil { notifyCompletion = d.bool(forKey: "notifyCompletion") }
+        if d.object(forKey: "notifyPermission") != nil { notifyPermission = d.bool(forKey: "notifyPermission") }
+        setupNotifications()
         let menu = NSMenu()
         menu.delegate = self
         statusItem.menu = menu
@@ -363,6 +374,59 @@ final class StatusController: NSObject, NSMenuDelegate {
             task.waitUntilExit()
             if task.terminationStatus == 0 { UserDefaults.standard.set(current, forKey: "installedVersion") }
         }
+    }
+
+    // MARK: notifications
+
+    func setupNotifications() {
+        let center = UNUserNotificationCenter.current()
+        center.delegate = self
+        // Register action categories once; the OS caches them across launches.
+        let openAction = UNNotificationAction(identifier: "OPEN", title: "Open", options: .foreground)
+        let reviewAction = UNNotificationAction(identifier: "OPEN", title: "Review", options: .foreground)
+        let doneCat = UNNotificationCategory(identifier: "DONE", actions: [openAction], intentIdentifiers: [], options: [])
+        let permCat = UNNotificationCategory(identifier: "PERM", actions: [reviewAction], intentIdentifiers: [], options: [])
+        center.setNotificationCategories([doneCat, permCat])
+        center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
+    }
+
+    func fireCompletionNotification(_ s: Session, duration: Double) {
+        let content = UNMutableNotificationContent()
+        content.title = "Claude finished"
+        content.body = s.project.isEmpty ? elapsed(max(0, Int(duration))) : "\(s.project)  ·  \(elapsed(max(0, Int(duration))))"
+        content.categoryIdentifier = "DONE"
+        content.userInfo = ["sid": s.id, "ep": s.entrypoint, "tp": s.termProgram]
+        let req = UNNotificationRequest(identifier: "done-\(s.id)", content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(req)
+    }
+
+    func firePermissionNotification(_ s: Session) {
+        let content = UNMutableNotificationContent()
+        content.title = "Approval needed"
+        content.body = s.project.isEmpty ? "Claude is waiting for your permission" : "\(s.project) is waiting for your permission"
+        content.categoryIdentifier = "PERM"
+        content.userInfo = ["sid": s.id, "ep": s.entrypoint, "tp": s.termProgram]
+        // Replace any prior permission notification for this session so they don't stack.
+        let req = UNNotificationRequest(identifier: "perm-\(s.id)", content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(req)
+    }
+
+    // Show notifications even when the menu is frontmost (menu bar apps are never key window).
+    func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
+                                withCompletionHandler handler: @escaping (UNNotificationPresentationOptions) -> Void) {
+        handler([.banner, .sound])
+    }
+
+    func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
+                                withCompletionHandler handler: @escaping () -> Void) {
+        let info = response.notification.request.content.userInfo
+        let sid = info["sid"] as? String ?? ""
+        let ep  = info["ep"]  as? String ?? ""
+        let tp  = info["tp"]  as? String ?? ""
+        if response.actionIdentifier == "OPEN" || response.actionIdentifier == UNNotificationDefaultActionIdentifier {
+            DispatchQueue.main.async { self.openSession(sid, entrypoint: ep, termProgram: tp) }
+        }
+        handler()
     }
 
     // `/bin/zsh -lc node` saw only the login PATH, missing nvm/fnm set in .zshrc.
@@ -576,11 +640,19 @@ final class StatusController: NSObject, NSMenuDelegate {
             settingsSub.addItem(it)
         }
 
+        settingsSub.addItem(header("Notifications"))
+        settingsSub.addItem(toggleRow(title: "Completion (5min+)", isOn: notifyCompletion) { [weak self] on in
+            self?.notifyCompletion = on
+            UserDefaults.standard.set(on, forKey: "notifyCompletion")
+        })
+        settingsSub.addItem(toggleRow(title: "Approval needed", isOn: notifyPermission) { [weak self] on in
+            self?.notifyPermission = on
+            UserDefaults.standard.set(on, forKey: "notifyPermission")
+        })
+
         settingsParent.submenu = settingsSub
         menu.addItem(settingsParent)
 
-        menu.addItem(.separator())
-        buildUsageItems(into: menu)
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Version \(currentVersion)", action: nil, keyEquivalent: ""))
         if let latest = UserDefaults.standard.string(forKey: "latestVersion"), versionIsNewer(latest, than: currentVersion) {
@@ -593,68 +665,6 @@ final class StatusController: NSObject, NSMenuDelegate {
         menu.addItem(q)
     }
 
-    // Token pricing per million tokens. Cache tokens bundled into input for simplicity.
-    static let modelPricing: [String: (input: Double, output: Double)] = [
-        "claude-opus-4-5":           (15.00, 75.00),
-        "claude-opus-4":             (15.00, 75.00),
-        "claude-sonnet-4-5":         ( 3.00, 15.00),
-        "claude-sonnet-4":           ( 3.00, 15.00),
-        "claude-haiku-4-5":          ( 0.80,  4.00),
-        "claude-haiku-3-5":          ( 0.80,  4.00),
-        "claude-3-5-sonnet-20241022":( 3.00, 15.00),
-        "claude-3-5-haiku-20241022": ( 0.80,  4.00),
-        "claude-3-opus-20240229":    (15.00, 75.00),
-    ]
-    static let contextWindow = 200_000
-
-    func buildUsageItems(into menu: NSMenu) {
-        // Aggregate across all active sessions.
-        let totalSessIn  = sessions.values.reduce(0) { $0 + $1.sessIn }
-        let totalSessOut = sessions.values.reduce(0) { $0 + $1.sessOut }
-        let totalTurnIn  = sessions.values.reduce(0) { $0 + $1.turnIn }
-        let totalTurnOut = sessions.values.reduce(0) { $0 + $1.turnOut }
-        let model = sessions.values.first(where: { !$0.model.isEmpty })?.model ?? ""
-
-        if #available(macOS 14.0, *) { menu.addItem(NSMenuItem.sectionHeader(title: "Usage")) }
-        else {
-            let h = NSMenuItem(title: "Usage", action: nil, keyEquivalent: ""); h.isEnabled = false; menu.addItem(h)
-        }
-
-        guard totalSessIn > 0 || totalSessOut > 0 else {
-            let it = NSMenuItem(title: "No data yet — finish a turn to see stats", action: nil, keyEquivalent: "")
-            it.isEnabled = false; menu.addItem(it); return
-        }
-
-        let fmt = { (n: Int) -> String in n >= 1000 ? "\(n / 1000)k" : "\(n)" }
-
-        if totalTurnIn > 0 || totalTurnOut > 0 {
-            let it = NSMenuItem(title: "Last turn:  \(fmt(totalTurnIn)) in / \(fmt(totalTurnOut)) out", action: nil, keyEquivalent: "")
-            it.isEnabled = false; menu.addItem(it)
-        }
-        let sessIt = NSMenuItem(title: "Session:     \(fmt(totalSessIn)) in / \(fmt(totalSessOut)) out", action: nil, keyEquivalent: "")
-        sessIt.isEnabled = false; menu.addItem(sessIt)
-
-        let pct = min(100, Int(Double(totalSessIn) / Double(StatusController.contextWindow) * 100))
-        let bar = String(repeating: "█", count: pct / 10) + String(repeating: "░", count: 10 - pct / 10)
-        let ctxIt = NSMenuItem(title: "Context:    \(bar)  \(pct)%", action: nil, keyEquivalent: "")
-        ctxIt.isEnabled = false; menu.addItem(ctxIt)
-
-        let rawPricing = StatusController.modelPricing.first(where: { model.hasPrefix($0.key) })?.value
-            ?? StatusController.modelPricing.first(where: { _ in model.contains("opus") })?.value
-        let pIn = rawPricing?.input ?? 3.00; let pOut = rawPricing?.output ?? 15.00
-        let cost = Double(totalSessIn) / 1_000_000 * pIn + Double(totalSessOut) / 1_000_000 * pOut
-        let costStr = cost < 0.01 ? "<$0.01" : String(format: "$%.2f", cost)
-        let modelTag = model.isEmpty ? "" : "  (\(shortModel(model)))"
-        let costIt = NSMenuItem(title: "Cost:         ~\(costStr)\(modelTag)", action: nil, keyEquivalent: "")
-        costIt.isEnabled = false; menu.addItem(costIt)
-    }
-
-    func shortModel(_ m: String) -> String {
-        if m.contains("opus")   { return "Opus" }
-        if m.contains("sonnet") { return "Sonnet" }
-        if m.contains("haiku")  { return "Haiku" }
-        return m
-    }
 
     func header(_ title: String) -> NSMenuItem {
         if #available(macOS 14.0, *) { return NSMenuItem.sectionHeader(title: title) }
@@ -728,10 +738,10 @@ final class StatusController: NSObject, NSMenuDelegate {
         let now = Date().timeIntervalSince1970
         let nameMax = Int(cfg["nameMax"] ?? 16)
         let working = (eff == "thinking" || eff == "tool") && s.startedAt > 0
-        let resting = !(eff == "permission" || eff == "thinking" || eff == "tool")  // the dim caret
+        let resting = eff == "idle"  // only truly idle sessions get the dim caret
         let tag = surfaceTag(s.entrypoint)
         v.configure(icon: sessionSymbol(s, eff: eff),
-                    iconTint: resting ? .tertiaryLabelColor : .labelColor,  // caret dim; spinner matches the name font; amber image ignores tint
+                    iconTint: resting ? .tertiaryLabelColor : .labelColor,  // caret dim; spinner/check/amber images ignore tint
                     name: truncated(sessionName(s), max: nameMax, keep: nameMax),
                     timer: working ? elapsed(max(0, Int(now - s.startedAt))) : nil,
                     pillNormal: tag.isEmpty ? nil : pillImage(tag),
@@ -794,7 +804,8 @@ final class StatusController: NSObject, NSMenuDelegate {
         switch eff {
         case "permission":       return symbolImage("exclamationmark.circle.fill", tint: amber)
         case "thinking", "tool": return rotatedSpinner(spinAngle)
-        default:                 return restingCaret   // done/idle merged: dim "ready for input" caret
+        case "done":             return symbolImage("checkmark.circle.fill", tint: .systemGreen)
+        default:                 return restingCaret   // idle: dim "ready for input" caret
         }
     }
 
@@ -865,9 +876,10 @@ final class StatusController: NSObject, NSMenuDelegate {
     // permission / thinking / tool / idle (done collapses to idle; waiting is never emitted).
     func priority(of eff: String) -> Int {
         switch eff {
-        case "permission":       return 2
-        case "thinking", "tool": return 1
-        default:                 return 0   // idle / unknown
+        case "permission":       return 3
+        case "thinking", "tool": return 2
+        case "done":             return 1   // recently completed: outranks idle, shown in the bar briefly
+        default:                 return 0   // idle
         }
     }
 
@@ -1002,14 +1014,27 @@ final class StatusController: NSObject, NSMenuDelegate {
                                  : (s.eff == "idle" && stalePruneAge > 0 && now - s.ts > stalePruneAge)
             if dead {
                 try? FileManager.default.removeItem(atPath: (stateDir as NSString).appendingPathComponent(id + ".json"))
-                sessions[id] = nil; fileMTimes[id + ".json"] = nil; soundPrev[id] = nil; turnStart[id] = nil; sessionWord[id] = nil
+                sessions[id] = nil; fileMTimes[id + ".json"] = nil; soundPrev[id] = nil; turnStart[id] = nil; sessionWord[id] = nil; doneUntil[id] = nil; permPrev[id] = nil
                 continue
             }
             sessions[id] = s
+            // A new turn clears the green-tick window so the done badge doesn't show while working.
+            if s.state == "thinking" || s.state == "tool" { doneUntil[id] = nil }
+            // Permission edge: fire a notification the first time this session enters permission state.
+            if s.eff == "permission", (permPrev[id] ?? "") != "permission" {
+                if notifyPermission { firePermissionNotification(s) }
+            }
+            // Clear the pending permission notification when permission is no longer needed.
+            if s.eff != "permission", (permPrev[id] ?? "") == "permission" {
+                UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: ["perm-\(id)"])
+            }
+            permPrev[id] = s.eff
             updateThinkingWord(s)   // must run before soundEdgeDone, which overwrites soundPrev[id]
             if soundEdgeDone(s, now: now) { chime = true }
         }
-        for id in Array(soundPrev.keys) where sessions[id] == nil { soundPrev[id] = nil; turnStart[id] = nil; sessionWord[id] = nil }
+        for id in Array(soundPrev.keys) where sessions[id] == nil { soundPrev[id] = nil; turnStart[id] = nil; sessionWord[id] = nil; doneUntil[id] = nil; permPrev[id] = nil }
+        // Prune expired doneUntil entries (session may have returned to working, clearing it early anyway).
+        for id in Array(doneUntil.keys) where (doneUntil[id] ?? 0) <= now { doneUntil[id] = nil }
         if chime, playCompletionSound { completionSound?.play() }
 
         // Surface the single highest-priority session (permission > working > …); ties broken by
@@ -1044,7 +1069,9 @@ final class StatusController: NSObject, NSMenuDelegate {
                last.contains("interrupted by user") { return "idle" }
             return s.state
         }
-        return s.state == "done" ? "idle" : s.state
+        // Keep "done" distinct from "idle" while its green-tick window is still open.
+        if s.state == "done" { return (doneUntil[s.id] ?? 0) > now ? "done" : "idle" }
+        return s.state
     }
 
     // Detect a session's working->done edge for the chime (turns >= 5 min only). Updates the
@@ -1053,7 +1080,13 @@ final class StatusController: NSObject, NSMenuDelegate {
         let prev = soundPrev[s.id] ?? ""
         if s.state == "thinking" || s.state == "tool", s.startedAt > 0 { turnStart[s.id] = s.startedAt }
         var edge = false
-        if s.state == "done", prev != "done", let st = turnStart[s.id], st > 0, now - st >= 300 { edge = true }
+        if s.state == "done", prev != "done" {
+            doneUntil[s.id] = now + 600  // green "Done" tick stays for 10 min
+            if let st = turnStart[s.id], st > 0, now - st >= 300 {
+                edge = true
+                if notifyCompletion { fireCompletionNotification(s, duration: now - st) }
+            }
+        }
         if s.state == "done" { turnStart[s.id] = 0 }
         soundPrev[s.id] = s.state
         return edge

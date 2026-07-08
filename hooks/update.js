@@ -81,7 +81,8 @@ process.stdin.on("end", () => {
       const model   = p.model || prev.model || "";
       const sessIn  = (prev.sessIn  || 0) + turnIn;
       const sessOut = (prev.sessOut || 0) + turnOut;
-      Object.assign(prev, { turnIn, turnOut, sessIn, sessOut, model });
+      const turnCount = (prev.turnCount || 0) + 1;
+      Object.assign(prev, { turnIn, turnOut, sessIn, sessOut, model, turnCount });
       break;
     }
     default:
@@ -98,8 +99,11 @@ process.stdin.on("end", () => {
   // stable for the session's life, on both CLI and desktop). The app uses kill(pid,0) for liveness.
   // started:true — any update.js event (prompt/tool/permission/stop) is real activity, so the session
   // graduates from "merely opened" to visible in the dropdown. Clicking a conversation never fires here.
-  if (event === "prompt") { prev.sessIn = 0; prev.sessOut = 0; }
-  const out = { state, label, tool: p.tool_name || "", project, sessionId: p.session_id || "", transcript: p.transcript_path || prev.transcript || "", entrypoint, term_program: termProgram, pid: process.ppid, started: true, startedAt, ts, turnIn: prev.turnIn || 0, turnOut: prev.turnOut || 0, sessIn: prev.sessIn || 0, sessOut: prev.sessOut || 0, model: prev.model || "" };
+  // sessStart: set on the first prompt and never reset, so the card can show elapsed session time.
+  if (event === "prompt" && !prev.sessStart) prev.sessStart = ts;
+  // sessIn/sessOut accumulate across all turns (context window grows with each turn); they are
+  // NOT reset on prompt. turnCount increments on each completed turn.
+  const out = { state, label, tool: p.tool_name || "", project, sessionId: p.session_id || "", transcript: p.transcript_path || prev.transcript || "", entrypoint, term_program: termProgram, pid: process.ppid, started: true, startedAt, ts, sessStart: prev.sessStart || 0, turnCount: prev.turnCount || 0, turnIn: prev.turnIn || 0, turnOut: prev.turnOut || 0, sessIn: prev.sessIn || 0, sessOut: prev.sessOut || 0, model: prev.model || "" };
   try {
     fs.mkdirSync(stateDir, { recursive: true });
     const tmp = statePath + "." + process.pid + ".tmp";
