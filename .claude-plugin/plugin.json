@@ -1,0 +1,9 @@
+{
+  "name": "claude-beacon",
+  "description": "Menu bar status indicator for Claude Code — animated spark while thinking, tool labels, permission dot, elapsed timer.",
+  "version": "0.3.2",
+  "author": { "name": "Gikunjuu" },
+  "homepage": "https://github.com/Gikunjuu/claude-beacon",
+  "repository": "https://github.com/Gikunjuu/claude-beacon",
+  "license": "MIT"
+}

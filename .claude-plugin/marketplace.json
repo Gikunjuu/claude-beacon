@@ -1,0 +1,12 @@
+{
+  "name": "claude-beacon",
+  "owner": { "name": "Gikunjuu" },
+  "plugins": [
+    {
+      "name": "claude-beacon",
+      "source": ".",
+      "description": "Menu bar status indicator for Claude Code — animated spark while thinking, tool labels, permission dot, elapsed timer.",
+      "version": "0.3.2"
+    }
+  ]
+}

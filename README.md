@@ -83,7 +83,7 @@ If you run in **auto / bypass mode**, permission prompts never fire anyway, so t
 
 > **Already have Claude Code open?** Restart it (or open a new session) once after installing. A running session loads its hooks at startup, so it won't pick up newly installed ones until you start fresh. After that first restart it's fully automatic.
 
-> The DMG is signed and notarized — no Gatekeeper warning, no right-click-to-open required.
+> **Current release is ad-hoc signed, not notarized.** macOS will show an "unidentified developer" warning on first open — right-click **Claude Beacon.app** (after dragging it to Applications) and choose **Open**, then confirm. This is temporary until Developer ID signing is set up for future releases.
 
 If the first-launch setup doesn't take, run it manually:
 ```bash
